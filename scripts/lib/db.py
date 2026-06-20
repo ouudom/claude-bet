@@ -3,6 +3,7 @@
 Source of truth = data/index.db (gitignored). Tables written live by the pipeline:
   odds_snapshot  — every poll of every book's line for a game (CLV substrate)
   game           — schedule + final result (settle target)
+  team_rating    — current Elo per team (model.py train output)
   pick           — model value picks (the "Trading Zone" analog)
   settle         — replay grades: CLV, W/L, Brier, ROI (the "trade_outcome" analog)
 """
@@ -36,6 +37,13 @@ CREATE TABLE IF NOT EXISTS odds_snapshot (
     FOREIGN KEY (game_id) REFERENCES game(game_id)
 );
 CREATE INDEX IF NOT EXISTS ix_snap_game_market ON odds_snapshot(game_id, market, book);
+
+CREATE TABLE IF NOT EXISTS team_rating (
+    team        TEXT PRIMARY KEY,          -- team name (matches game.home/away)
+    rating      REAL NOT NULL,             -- current Elo (BASE_RATING cold-start)
+    games       INTEGER NOT NULL DEFAULT 0,-- games trained through
+    updated_at  TEXT NOT NULL              -- ISO8601 UTC of last train pass
+);
 
 CREATE TABLE IF NOT EXISTS pick (
     pick_id      INTEGER PRIMARY KEY AUTOINCREMENT,

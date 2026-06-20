@@ -31,10 +31,16 @@ Grade on CLV first, ROI second. ROI without CLV = luck.
 ## Build order (each gates the next)
 1. **`odds_store.py`** ✅ — CLV substrate. Snapshot lines on a schedule (run NOW; CLV
    can't be backfilled). Writes `game` + `odds_snapshot`.
-2. `fetch.py` + `results.py` — schedule, box scores, final scores → settle `game`.
-3. `model.py` — Elo/power-ratings + pace → fair total/spread → vig-free prob.
-4. `settle.py` + `calibration.py` — CLV-first grader.
-5. `gates.py` + `edge.py` — value picks + pre-lock gating (LLM qualitative read).
+2. `fetch.py` + `results.py` ✅ — schedule (free `/events`) + final scores (`/scores`)
+   → settle `game`. Same event ids as odds_snapshot, so no cross-source id mapping.
+3. `model.py` ✅ — Elo power ratings → fair ML prob + spread margin/cover prob.
+   Totals deferred (needs pace/efficiency = box stats, Phase 1). Trains `team_rating`.
+4. `settle.py` + `calibration.py` ✅ — CLV-first grader. settle: CLV vs sharp close
+   (devigged) + W/L/push + pnl + Brier → `settle`. calibration: WORKING/DEAD by
+   market/spot, min-n gated, n≥300 for money. Writes `data/calibration.md`.
+5. `gates.py` + `edge.py` ✅ — edge: value picks where `model_prob − vig-free implied >
+   threshold`, best soft price, quarter-Kelly stake → `pick`. gates: rest/B2B, sharp
+   line-move, stale, locked vetoes (injury/lineup = Phase 1 stub).
 
 ## Hard gate before any real money / paid signals
 Positive **CLV over n ≥ 300 paper bets** — not just positive ROI.
