@@ -1,0 +1,8 @@
+.venv/
+.pydeps/
+.env
+data/*.db
+data/*.db-journal
+__pycache__/
+*.pyc
+.DS_Store
