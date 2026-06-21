@@ -80,6 +80,26 @@ bash scripts/pyrun.sh scripts/models/soccer.py --train --pool intl --neutral
 bash scripts/pyrun.sh scripts/pipeline/edge.py   # sport-dispatches automatically per game row
 ```
 
+## Daily Claude run (predict → notify → learn)
+Prediction is the **Claude blend** (`models/claude.py`): the Elo/Poisson prior is fed to
+`claude-opus-4-8` with its server-side `web_search` tool (injuries/lineups/rest/form/news),
+which returns a calibrated fair-line adjustment. Every prediction + its web citations are
+stored (`claude_pred`, `evidence`); CLV/Brier/ROI grades flow back into `data/calibration.md`,
+which is injected into the next prompt — the continuous-learning loop.
+
+`scripts/run_daily.sh` is the entrypoint: grade yesterday → fetch+snapshot tonight →
+retrain priors → `edge.py --window 17:00 12:00` (picks for 5pm today→noon tomorrow, local) →
+`notify.py` (Telegram push). Leagues: NBA + top-5 European + UCL + World Cup.
+
+```bash
+cp .env.example .env   # add ODDS_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+bash scripts/pyrun.sh --setup        # installs anthropic + deps
+bash scripts/run_daily.sh            # run once by hand to verify
+```
+Claude auth comes from the Claude Code profile (`ant auth login`) — no API key in `.env`.
+Scheduled at 3pm local as a **cowork routine** (`/schedule`) that invokes
+`/daily-picks` (`.claude/commands/daily-picks.md`), so it runs even without a local cron.
+
 ## Data stack (all free tier)
 - Odds + line movement: the-odds-api.com (regions `us,eu` — eu pulls Pinnacle anchor)
 - NBA stats/schedule/box: nba_api

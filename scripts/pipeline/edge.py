@@ -74,10 +74,18 @@ def _quarter_kelly(model_prob, price, frac, cap):
     return max(0.0, min(cap, frac * f))
 
 
-def find_edges(conn, threshold, kelly_frac, verbose):
-    games = conn.execute(
-        "SELECT * FROM game WHERE status='scheduled' ORDER BY commence ASC"
-    ).fetchall()
+def find_edges(conn, threshold, kelly_frac, verbose, win_start=None, win_end=None):
+    if win_start and win_end:
+        games = conn.execute(
+            """SELECT * FROM game WHERE status='scheduled'
+                 AND commence >= ? AND commence < ? ORDER BY commence ASC""",
+            (win_start, win_end),
+        ).fetchall()
+        print(f"[edge] game window {win_start} -> {win_end} UTC: {len(games)} games")
+    else:
+        games = conn.execute(
+            "SELECT * FROM game WHERE status='scheduled' ORDER BY commence ASC"
+        ).fetchall()
     now = _now()
     n_written = n_blocked = n_existing = 0
 
@@ -87,7 +95,7 @@ def find_edges(conn, threshold, kelly_frac, verbose):
         if not lines:
             continue
         m = registry.for_sport(sport)
-        pred = m.predict(conn, home, away, sport_key=sport)
+        pred = m.predict(conn, home, away, sport_key=sport, commence=g["commence"])
 
         # best price per (market, outcome) across books = best payout = best edge/CLV
         best = {}
@@ -149,15 +157,33 @@ def find_edges(conn, threshold, kelly_frac, verbose):
     print(f"[edge] wrote {n_written} picks, blocked {n_blocked}, {n_existing} already existed")
 
 
+def _today_window(start_hhmm, end_hhmm):
+    """Local 'today HH:MM' -> 'tomorrow HH:MM' as UTC ISO bounds (local = machine tz)."""
+    now = dt.datetime.now().astimezone()                 # local tz-aware
+    sh, sm = (int(x) for x in start_hhmm.split(":"))
+    eh, em = (int(x) for x in end_hhmm.split(":"))
+    start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+    end = (start + dt.timedelta(days=1)).replace(hour=eh, minute=em)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return (start.astimezone(dt.timezone.utc).strftime(fmt),
+            end.astimezone(dt.timezone.utc).strftime(fmt))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--threshold", type=float, default=0.03, help="min vig-free edge to bet")
     ap.add_argument("--kelly", type=float, default=0.25, help="Kelly fraction (0.25 = quarter)")
     ap.add_argument("-v", "--verbose", action="store_true", help="show blocked candidates")
+    ap.add_argument("--window", nargs=2, metavar=("START", "END"),
+                    help="local game window as HH:MM HH:MM (today START -> tomorrow END), "
+                         "e.g. --window 17:00 12:00 for 5pm today -> noon tomorrow")
     args = ap.parse_args()
     conn = db.init()
     registry.ensure_config(conn)
-    find_edges(conn, args.threshold, args.kelly, args.verbose)
+    ws = we = None
+    if args.window:
+        ws, we = _today_window(args.window[0], args.window[1])
+    find_edges(conn, args.threshold, args.kelly, args.verbose, ws, we)
 
 
 if __name__ == "__main__":

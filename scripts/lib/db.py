@@ -8,6 +8,8 @@ Source of truth = data/index.db (gitignored). Tables written live by the pipelin
   sport_config   — sport_key -> which model adapter + gate params to use (lib/registry.py)
   pick           — model value picks (the "Trading Zone" analog)
   settle         — replay grades: CLV, W/L, Brier, ROI (the "trade_outcome" analog)
+  claude_pred    — Claude's fair-prob output + numeric prior + rationale (audit/learning)
+  evidence       — web-search citations Claude used per game (audit/learning substrate)
 """
 import os
 import sqlite3
@@ -78,8 +80,38 @@ CREATE TABLE IF NOT EXISTS pick (
     implied_prob REAL NOT NULL,            -- vig-free implied prob at bet_price
     edge         REAL NOT NULL,            -- model_prob - implied_prob
     stake_units  REAL NOT NULL DEFAULT 1.0,
+    source       TEXT NOT NULL DEFAULT 'claude',  -- predictor that produced this pick
+    notified_at  TEXT,                     -- ISO8601 UTC when pushed to telegram (NULL=unsent)
     FOREIGN KEY (game_id) REFERENCES game(game_id)
 );
+
+CREATE TABLE IF NOT EXISTS claude_pred (
+    pred_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id      TEXT NOT NULL,
+    created_at   TEXT NOT NULL,            -- ISO8601 UTC of the prediction call
+    market       TEXT NOT NULL,            -- h2h|spreads (the candidate the prob is for)
+    outcome      TEXT NOT NULL,            -- team name | Draw
+    point        REAL,                     -- spread line (NULL for h2h)
+    prob         REAL NOT NULL,            -- Claude's calibrated fair probability
+    prior_prob   REAL,                     -- Elo/Poisson prior for the same outcome
+    rationale    TEXT,                     -- one-line reason (injuries/form/news)
+    model_id     TEXT NOT NULL,            -- e.g. claude-opus-4-8
+    prompt_ver   TEXT NOT NULL,            -- prompt schema version, for replay analysis
+    FOREIGN KEY (game_id) REFERENCES game(game_id)
+);
+CREATE INDEX IF NOT EXISTS ix_cpred_game ON claude_pred(game_id, market, outcome);
+
+CREATE TABLE IF NOT EXISTS evidence (
+    evid_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    game_id      TEXT NOT NULL,
+    captured_at  TEXT NOT NULL,            -- ISO8601 UTC of the prediction call
+    query        TEXT,                     -- search query Claude issued
+    source_url   TEXT,                     -- citation URL
+    title        TEXT,                     -- citation title
+    snippet      TEXT,                     -- cited text / encrypted index excerpt
+    FOREIGN KEY (game_id) REFERENCES game(game_id)
+);
+CREATE INDEX IF NOT EXISTS ix_evidence_game ON evidence(game_id);
 
 CREATE TABLE IF NOT EXISTS settle (
     pick_id      INTEGER PRIMARY KEY,
@@ -101,9 +133,20 @@ def connect():
     return conn
 
 
+def _migrate(conn):
+    """Additive column migrations for DBs created before a column existed."""
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(pick)").fetchall()}
+    if "source" not in cols:
+        conn.execute("ALTER TABLE pick ADD COLUMN source TEXT NOT NULL DEFAULT 'claude'")
+    if "notified_at" not in cols:
+        conn.execute("ALTER TABLE pick ADD COLUMN notified_at TEXT")
+    conn.commit()
+
+
 def init():
     conn = connect()
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
     return conn
 
