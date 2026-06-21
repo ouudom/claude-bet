@@ -1,9 +1,11 @@
-"""Canonical SQLite store for the NBA betting engine (mirrors swing-trading/scripts/db.py).
+"""Canonical SQLite store for the multi-sport betting engine.
 
 Source of truth = data/index.db (gitignored). Tables written live by the pipeline:
   odds_snapshot  — every poll of every book's line for a game (CLV substrate)
   game           — schedule + final result (settle target)
-  team_rating    — current Elo per team (model.py train output)
+  rating         — current per-team model params, generic across sports (JSON params)
+  sport_param    — per-sport/pool scalars (home_adv, MARGIN_SD, etc — JSON params)
+  sport_config   — sport_key -> which model adapter + gate params to use (lib/registry.py)
   pick           — model value picks (the "Trading Zone" analog)
   settle         — replay grades: CLV, W/L, Brier, ROI (the "trade_outcome" analog)
 """
@@ -38,11 +40,30 @@ CREATE TABLE IF NOT EXISTS odds_snapshot (
 );
 CREATE INDEX IF NOT EXISTS ix_snap_game_market ON odds_snapshot(game_id, market, book);
 
-CREATE TABLE IF NOT EXISTS team_rating (
-    team        TEXT PRIMARY KEY,          -- team name (matches game.home/away)
-    rating      REAL NOT NULL,             -- current Elo (BASE_RATING cold-start)
+CREATE TABLE IF NOT EXISTS rating (
+    sport       TEXT NOT NULL,             -- the-odds-api sport key
+    pool        TEXT NOT NULL DEFAULT '',  -- '' for NBA; 'club'|'intl' for soccer
+    team        TEXT NOT NULL,             -- team name (matches game.home/away)
+    params      TEXT NOT NULL,             -- JSON, shape owned by the model adapter
     games       INTEGER NOT NULL DEFAULT 0,-- games trained through
-    updated_at  TEXT NOT NULL              -- ISO8601 UTC of last train pass
+    updated_at  TEXT NOT NULL,             -- ISO8601 UTC of last train pass
+    PRIMARY KEY (sport, pool, team)
+);
+
+CREATE TABLE IF NOT EXISTS sport_param (
+    sport       TEXT NOT NULL,             -- the-odds-api sport key
+    pool        TEXT NOT NULL DEFAULT '',  -- '' for NBA; 'club'|'intl' for soccer
+    params      TEXT NOT NULL,             -- JSON, shape owned by the model adapter
+    updated_at  TEXT NOT NULL,
+    PRIMARY KEY (sport, pool)
+);
+
+CREATE TABLE IF NOT EXISTS sport_config (
+    sport_key       TEXT PRIMARY KEY,      -- the-odds-api sport key
+    model           TEXT NOT NULL,         -- registry key: nba | soccer
+    pool            TEXT NOT NULL DEFAULT '',
+    congestion_days INTEGER,               -- NULL = disabled (NBA default)
+    markets         TEXT NOT NULL          -- JSON list, e.g. ["h2h","spreads"]
 );
 
 CREATE TABLE IF NOT EXISTS pick (

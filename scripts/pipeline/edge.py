@@ -13,20 +13,22 @@ We bet the BEST soft-book price (max payout = max edge and max CLV vs the sharp 
 devigging that same book's two-way market for the honest implied. Pinnacle is the grading
 anchor (settle.py), not a bet target. Markets: h2h + spreads (totals = Phase 1).
 
-Requires team_rating (run `model.py --train` first) and recent odds_store.py snapshots.
+Requires `rating` (run the sport's model module with --train first, e.g.
+models/nba.py) and recent odds_store.py snapshots.
 
 Usage:
-    bash scripts/pyrun.sh scripts/edge.py
-    bash scripts/pyrun.sh scripts/edge.py --threshold 0.04 --kelly 0.25
+    bash scripts/pyrun.sh scripts/pipeline/edge.py
+    bash scripts/pyrun.sh scripts/pipeline/edge.py --threshold 0.04 --kelly 0.25
 """
 import argparse
 import datetime as dt
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from lib import db, odds  # noqa: E402
-import model  # noqa: E402
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
+from lib import db, odds, registry  # noqa: E402
 import gates  # noqa: E402
 
 KELLY_CAP = 3.0          # max paper units per pick
@@ -54,30 +56,14 @@ def _latest_lines(conn, game_id):
     return out
 
 
-def _model_prob(pred, market, outcome, point, home, away):
-    """Model fair prob for a specific candidate outcome/point. None if unsupported."""
-    if market == "h2h":
-        return pred["ml_home"] if outcome == home else (pred["ml_away"] if outcome == away else None)
-    if market == "spreads":
-        # home covers if home_margin + point > 0 ; away if -home_margin + point > 0
-        if outcome == home:
-            z = (pred["fair_margin"] + point) / model.MARGIN_SD
-        elif outcome == away:
-            z = (-pred["fair_margin"] + point) / model.MARGIN_SD
-        else:
-            return None
-        return model._norm_cdf(z)
-    return None  # totals = Phase 1
-
-
 def _vigfree_at(lines, book, market, outcome):
-    """Devigged implied for `outcome` using `book`'s own two-way market. None if not clean."""
+    """Devigged implied for `outcome` in `book`'s market (n-way: 2-way ML/AH, 3-way 1X2)."""
     sides = {oc: pr for (b, mk, oc), (pt, pr) in lines.items() if b == book and mk == market}
-    if outcome not in sides or len(sides) != 2:
+    if outcome not in sides or len(sides) < 2:
         return None
-    other = next(o for o in sides if o != outcome)
-    p, _ = odds.devig_two_way(sides[outcome], sides[other])
-    return p
+    outcomes = list(sides.keys())
+    probs = odds.devig_n_way([sides[o] for o in outcomes])
+    return probs[outcomes.index(outcome)]
 
 
 def _quarter_kelly(model_prob, price, frac, cap):
@@ -96,11 +82,12 @@ def find_edges(conn, threshold, kelly_frac, verbose):
     n_written = n_blocked = n_existing = 0
 
     for g in games:
-        gid, home, away = g["game_id"], g["home"], g["away"]
+        gid, home, away, sport = g["game_id"], g["home"], g["away"], g["sport"]
         lines = _latest_lines(conn, gid)
         if not lines:
             continue
-        pred = model.predict(conn, home, away)
+        m = registry.for_sport(sport)
+        pred = m.predict(conn, home, away, sport_key=sport)
 
         # best price per (market, outcome) across books = best payout = best edge/CLV
         best = {}
@@ -113,7 +100,7 @@ def find_edges(conn, threshold, kelly_frac, verbose):
                 best[key] = (book, dec, price)
 
         for (market, outcome, point), (book, _dec, price) in best.items():
-            mp = _model_prob(pred, market, outcome, point, home, away)
+            mp = m.model_prob(pred, market, outcome, point, home, away)
             if mp is None:
                 continue
             implied = _vigfree_at(lines, book, market, outcome)
@@ -123,9 +110,12 @@ def find_edges(conn, threshold, kelly_frac, verbose):
             if edge <= threshold:
                 continue
 
-            our_team = None if market == "totals" else outcome
+            no_side = market == "totals" or outcome.lower() == "draw"
+            our_team = None if no_side else outcome
             opp_team = None if our_team is None else (away if our_team == home else home)
-            ok, gs = gates.run_gates(conn, gid, market, outcome, our_team, opp_team, g["commence"])
+            congestion_days = m.gate_params(sport)["congestion_days"]
+            ok, gs = gates.run_gates(conn, gid, market, outcome, our_team, opp_team, g["commence"],
+                                      congestion_days=congestion_days)
             tag = f"{away}@{home} {market} {outcome} {point if point is not None else ''} " \
                   f"@{price}({book}) edge={edge*100:+.1f}%"
             if not ok:
@@ -166,6 +156,7 @@ def main():
     ap.add_argument("-v", "--verbose", action="store_true", help="show blocked candidates")
     args = ap.parse_args()
     conn = db.init()
+    registry.ensure_config(conn)
     find_edges(conn, args.threshold, args.kelly, args.verbose)
 
 

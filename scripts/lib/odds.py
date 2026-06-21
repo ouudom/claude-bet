@@ -29,10 +29,29 @@ def devig_two_way(price_a, price_b):
     return ra / total, rb / total
 
 
+def devig_n_way(prices):
+    """Remove vig from an n-way market (e.g. soccer 1X2). Returns probs summing to 1.0.
+
+    Same proportional devig as devig_two_way, generalized to any outcome count —
+    devig_two_way(a, b) == tuple(devig_n_way([a, b])).
+    """
+    implied = [american_to_implied(p) for p in prices]
+    total = sum(implied)
+    return [p / total for p in implied]
+
+
 def payout_units(result, price, stake_units=1.0):
-    """Profit/loss in units for a settled bet at American `price`."""
+    """Profit/loss in units for a settled bet at American `price`.
+
+    half_win/half_loss = Asian Handicap quarter-line split (half the stake pushes).
+    """
+    dec = american_to_decimal(price)
     if result == "win":
-        return stake_units * (american_to_decimal(price) - 1.0)
+        return stake_units * (dec - 1.0)
     if result == "loss":
         return -stake_units
+    if result == "half_win":
+        return stake_units * 0.5 * (dec - 1.0)
+    if result == "half_loss":
+        return -stake_units * 0.5
     return 0.0  # push

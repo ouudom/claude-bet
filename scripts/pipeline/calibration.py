@@ -15,14 +15,16 @@ CLV over >=300 paper bets before any real money / paid signals).
 Writes data/calibration.md (gitignored, regenerable) and prints the same to stdout.
 
 Usage:
-    bash scripts/pyrun.sh scripts/calibration.py
-    bash scripts/pyrun.sh scripts/calibration.py --min-n 50
+    bash scripts/pyrun.sh scripts/pipeline/calibration.py
+    bash scripts/pyrun.sh scripts/pipeline/calibration.py --min-n 50
 """
 import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
 from lib import db  # noqa: E402
 
 MIN_N = 30      # below this: INCONCLUSIVE
@@ -59,8 +61,8 @@ def summarize(rows, min_n):
     briers = [r["brier"] for r in rows if r["brier"] is not None]
     staked = sum(r["stake_units"] for r in rows)
     pnl = sum(r["pnl_units"] for r in rows)
-    w = sum(1 for r in rows if r["result"] == "win")
-    l = sum(1 for r in rows if r["result"] == "loss")
+    w = sum(1 for r in rows if r["result"] in ("win", "half_win"))
+    l = sum(1 for r in rows if r["result"] in ("loss", "half_loss"))
     push = sum(1 for r in rows if r["result"] == "push")
 
     clv_mean = _mean(clvs)

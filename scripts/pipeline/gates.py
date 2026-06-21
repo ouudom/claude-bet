@@ -8,6 +8,9 @@ AND the sharp line agree." These gates encode the cheap, data-derivable vetoes:
   line_move  — sharp (pinnacle) moved AGAINST our side since open -> BLOCK
                (we'd be taking the wrong side of sharp money = negative-CLV setup)
   rest       — our side on a back-to-back while the opponent rested -> BLOCK
+  congestion — our side played >=3 fixtures in the trailing 7 days -> BLOCK
+               (soccer fixture-congestion adapter; congestion_days=None disables it,
+               which is the NBA default since "back-to-back" already covers rest there)
 
 Qualitative injury/lineup reads need a feed (ESPN/Rotowire) and are Phase 1 — the
 `lineup` gate is a stub that passes with a note so the wiring is ready.
@@ -19,7 +22,9 @@ import os
 import sys
 from collections import namedtuple
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
 from lib import odds  # noqa: E402
 
 Gate = namedtuple("Gate", "name ok detail")
@@ -54,18 +59,21 @@ def gate_stale(conn, game_id, market, commence):
 
 
 def _anchor_vigfree(conn, game_id, market, outcome, captured_at):
-    """Devigged anchor prob for `outcome` at a given snapshot time. None if not 2-way."""
+    """Devigged anchor prob for `outcome` at a given snapshot time. None if outcome missing.
+
+    n-way generic (2-way ML, 3-way soccer 1X2 — devig_two_way == devig_n_way for n=2).
+    """
     rows = conn.execute(
         """SELECT outcome, price FROM odds_snapshot
             WHERE game_id=? AND market=? AND book=? AND captured_at=?""",
         (game_id, market, ANCHOR, captured_at),
     ).fetchall()
     m = {r["outcome"]: r["price"] for r in rows}
-    if outcome not in m or len(m) != 2:
+    if outcome not in m or len(m) < 2:
         return None
-    other = next(o for o in m if o != outcome)
-    p, _ = odds.devig_two_way(m[outcome], m[other])
-    return p
+    outcomes = list(m.keys())
+    probs = odds.devig_n_way([m[o] for o in outcomes])
+    return probs[outcomes.index(outcome)]
 
 
 def gate_line_move(conn, game_id, market, outcome, commence):
@@ -118,13 +126,41 @@ def gate_lineup(conn, game_id):
     return Gate("lineup", True, "stub — injury/lineup feed = Phase 1")
 
 
-def run_gates(conn, game_id, market, outcome, our_team, opp_team, commence):
-    """All gates for one candidate. Returns (ok_all, [Gate,...])."""
+def _fixtures_in_window(conn, team, commence, days):
+    rows = conn.execute(
+        """SELECT commence FROM game
+            WHERE (home=? OR away=?) AND commence<? AND commence>=?""",
+        (team, team, commence, _iso(_parse(commence) - dt.timedelta(days=days))),
+    ).fetchall()
+    return len(rows)
+
+
+def _iso(t):
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def gate_congestion(conn, our_team, commence, days=7, max_fixtures=2):
+    """Block if our side played > max_fixtures in the trailing `days` (soccer adapter).
+
+    days=None disables the gate entirely (NBA default — back-to-back already covers it).
+    """
+    if days is None or our_team is None:
+        return Gate("congestion", True, "n/a")
+    n = _fixtures_in_window(conn, our_team, commence, days)
+    return Gate("congestion", n <= max_fixtures, f"{n} fixtures in trailing {days}d")
+
+
+def run_gates(conn, game_id, market, outcome, our_team, opp_team, commence, congestion_days=None):
+    """All gates for one candidate. Returns (ok_all, [Gate,...]).
+
+    congestion_days: pass e.g. 7 for soccer; leave None (default) for NBA.
+    """
     gs = [
         gate_locked(commence),
         gate_stale(conn, game_id, market, commence),
         gate_line_move(conn, game_id, market, outcome, commence),
         gate_rest(conn, our_team, opp_team, commence),
+        gate_congestion(conn, our_team, commence, days=congestion_days),
         gate_lineup(conn, game_id),
     ]
     return all(g.ok for g in gs), gs

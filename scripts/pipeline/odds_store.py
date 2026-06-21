@@ -6,8 +6,10 @@ Run it a few times a day; each run appends an odds_snapshot row per book/market/
 The last snapshot before tip-off becomes the de-facto closing line at settle time.
 
 Usage:
-    bash scripts/pyrun.sh scripts/odds_store.py
-    bash scripts/pyrun.sh scripts/odds_store.py --regions us,eu --markets h2h,spreads,totals
+    bash scripts/pyrun.sh scripts/pipeline/odds_store.py
+    bash scripts/pyrun.sh scripts/pipeline/odds_store.py --regions us,eu --markets h2h,spreads,totals
+    # soccer / live World Cup capture (3-way h2h stored raw — devig at model/settle time):
+    bash scripts/pyrun.sh scripts/pipeline/odds_store.py --sport soccer_fifa_world_cup
 
 Env: ODDS_API_KEY (the-odds-api.com free tier). Copy .env.example -> .env and fill it.
 """
@@ -19,10 +21,11 @@ import sys
 import requests
 from dotenv import load_dotenv
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
 from lib import db  # noqa: E402
 
-SPORT = "basketball_nba"
 BASE = "https://api.the-odds-api.com/v4"
 
 
@@ -30,8 +33,8 @@ def _now():
     return dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def fetch_odds(api_key, regions, markets):
-    url = f"{BASE}/sports/{SPORT}/odds"
+def fetch_odds(api_key, sport, regions, markets):
+    url = f"{BASE}/sports/{sport}/odds"
     params = {
         "apiKey": api_key,
         "regions": regions,            # us,eu (eu includes pinnacle = sharp anchor)
@@ -47,7 +50,7 @@ def fetch_odds(api_key, regions, markets):
     return r.json()
 
 
-def store(conn, events):
+def store(conn, sport, events):
     captured_at = _now()
     n_games = n_rows = 0
     for ev in events:
@@ -56,7 +59,7 @@ def store(conn, events):
             """INSERT INTO game (game_id, sport, commence, home, away)
                VALUES (?,?,?,?,?)
                ON CONFLICT(game_id) DO UPDATE SET commence=excluded.commence""",
-            (gid, SPORT, ev["commence_time"], ev["home_team"], ev["away_team"]),
+            (gid, sport, ev["commence_time"], ev["home_team"], ev["away_team"]),
         )
         n_games += 1
         for bk in ev.get("bookmakers", []):
@@ -79,6 +82,8 @@ def store(conn, events):
 def main():
     load_dotenv(os.path.join(db.ROOT, ".env"))
     ap = argparse.ArgumentParser()
+    ap.add_argument("--sport", default="basketball_nba",
+                    help="the-odds-api sport key (e.g. soccer_fifa_world_cup, soccer_epl)")
     ap.add_argument("--regions", default="us,eu")
     ap.add_argument("--markets", default="h2h,spreads,totals")
     args = ap.parse_args()
@@ -89,8 +94,8 @@ def main():
                  "(free key: https://the-odds-api.com).")
 
     conn = db.init()
-    events = fetch_odds(api_key, args.regions, args.markets)
-    store(conn, events)
+    events = fetch_odds(api_key, args.sport, args.regions, args.markets)
+    store(conn, args.sport, events)
 
 
 if __name__ == "__main__":

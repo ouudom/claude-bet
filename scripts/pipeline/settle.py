@@ -13,14 +13,16 @@ proven leading indicator of long-run edge, so a pick with no anchor close stays
 ungraded for CLV (clv=NULL) rather than guessing.
 
 Usage:
-    bash scripts/pyrun.sh scripts/settle.py
-    bash scripts/pyrun.sh scripts/settle.py --anchor pinnacle
+    bash scripts/pyrun.sh scripts/pipeline/settle.py
+    bash scripts/pyrun.sh scripts/pipeline/settle.py --anchor pinnacle
 """
 import argparse
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
 from lib import db, odds  # noqa: E402
 
 
@@ -61,10 +63,32 @@ def closing_line(conn, game_id, market, anchor, commence):
     return _map(alt["book"])
 
 
+def _ah_grade(margin):
+    if margin > 0:
+        return "win"
+    if margin < 0:
+        return "loss"
+    return "push"
+
+
+_AH_COMBINE = {  # (half1, half2) -> combined result; quarter-line Asian Handicap split
+    ("win", "win"): "win", ("loss", "loss"): "loss", ("push", "push"): "push",
+    ("win", "push"): "half_win", ("push", "win"): "half_win",
+    ("loss", "push"): "half_loss", ("push", "loss"): "half_loss",
+}
+
+
 def grade_result(market, outcome, point, home, away, hs, away_s):
-    """win/loss/push for the bet against the final score. None if unrecognized."""
+    """win/loss/push (+half_win/half_loss for AH quarter lines) vs the final score.
+
+    None if unrecognized. h2h is outcome-vs-winner generically, so 3-way soccer 1X2
+    (home/away/"Draw") falls out of the same comparison as NBA's 2-way ML.
+    """
     if market == "h2h":
-        winner = home if hs > away_s else away
+        if hs == away_s:
+            winner = "Draw"
+        else:
+            winner = home if hs > away_s else away
         return "win" if outcome == winner else "loss"
     if market == "spreads":
         if outcome == home:
@@ -73,7 +97,12 @@ def grade_result(market, outcome, point, home, away, hs, away_s):
             m = (away_s - hs) + point
         else:
             return None
-        return "push" if m == 0 else ("win" if m > 0 else "loss")
+        is_quarter = (point * 4) % 2 != 0   # e.g. -0.25/-0.75 (Asian Handicap split line)
+        if not is_quarter:
+            return "push" if m == 0 else ("win" if m > 0 else "loss")
+        g1 = _ah_grade(m - 0.25)
+        g2 = _ah_grade(m + 0.25)
+        return _AH_COMBINE[(g1, g2)]
     if market == "totals":
         total = hs + away_s
         o = outcome.lower()
@@ -88,15 +117,15 @@ def grade_result(market, outcome, point, home, away, hs, away_s):
 
 
 def _vigfree_close(close_map, outcome):
-    """Devigged closing prob for `outcome` (needs both sides). (prob, our_price) or (None, price)."""
+    """Devigged closing prob for `outcome` (n-way: 2-way ML/spreads, 3-way soccer 1X2)."""
     if not close_map or outcome not in close_map:
         return None, None
     our_price = close_map[outcome]
-    others = [oc for oc in close_map if oc != outcome]
-    if len(others) != 1:
-        return None, our_price          # not a clean 2-way market -> no honest devig
-    p_out, _ = odds.devig_two_way(our_price, close_map[others[0]])
-    return p_out, our_price
+    if len(close_map) < 2:
+        return None, our_price          # not a clean market -> no honest devig
+    outcomes = list(close_map.keys())
+    probs = odds.devig_n_way([close_map[o] for o in outcomes])
+    return probs[outcomes.index(outcome)], our_price
 
 
 def settle_all(conn, anchor):
@@ -115,7 +144,8 @@ def settle_all(conn, anchor):
         result = grade_result(p["market"], p["outcome"], p["point"],
                               p["home"], p["away"], p["home_score"], p["away_score"])
         pnl = odds.payout_units(result, p["bet_price"], p["stake_units"])
-        y = None if result == "push" else (1.0 if result == "win" else 0.0)
+        y = {"push": None, "win": 1.0, "loss": 0.0,
+             "half_win": 1.0, "half_loss": 0.0}.get(result)
         brier = None if y is None else (p["model_prob"] - y) ** 2
 
         _, close_map = closing_line(conn, p["game_id"], p["market"], anchor, p["commence"])

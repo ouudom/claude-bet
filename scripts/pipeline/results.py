@@ -9,8 +9,9 @@ Cost: /scores with daysFrom counts as 2 requests against the quota; without hist
 days it is free. We default daysFrom=3 to backfill any games missed while down.
 
 Usage:
-    bash scripts/pyrun.sh scripts/results.py
-    bash scripts/pyrun.sh scripts/results.py --days 1
+    bash scripts/pyrun.sh scripts/pipeline/results.py
+    bash scripts/pyrun.sh scripts/pipeline/results.py --days 1
+    bash scripts/pyrun.sh scripts/pipeline/results.py --sport soccer_fifa_world_cup
 
 Env: ODDS_API_KEY (the-odds-api.com free tier). Copy .env.example -> .env and fill it.
 """
@@ -21,15 +22,16 @@ import sys
 import requests
 from dotenv import load_dotenv
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
+sys.path.insert(0, _HERE)
 from lib import db  # noqa: E402
 
-SPORT = "basketball_nba"
 BASE = "https://api.the-odds-api.com/v4"
 
 
-def fetch_scores(api_key, days):
-    url = f"{BASE}/sports/{SPORT}/scores"
+def fetch_scores(api_key, sport, days):
+    url = f"{BASE}/sports/{sport}/scores"
     params = {"apiKey": api_key, "dateFormat": "iso", "daysFrom": days}
     r = requests.get(url, params=params, timeout=30)
     r.raise_for_status()
@@ -50,7 +52,7 @@ def _score_for(scores, team):
     return None
 
 
-def store(conn, games):
+def store(conn, sport, games):
     n_final = n_skip = 0
     for ev in games:
         if not ev.get("completed"):
@@ -71,7 +73,7 @@ def store(conn, games):
                    home_score=excluded.home_score,
                    away_score=excluded.away_score,
                    status='final'""",
-            (gid, SPORT, ev["commence_time"], ev["home_team"], ev["away_team"],
+            (gid, sport, ev["commence_time"], ev["home_team"], ev["away_team"],
              home_pts, away_pts),
         )
         n_final += 1
@@ -82,6 +84,8 @@ def store(conn, games):
 def main():
     load_dotenv(os.path.join(db.ROOT, ".env"))
     ap = argparse.ArgumentParser()
+    ap.add_argument("--sport", default="basketball_nba",
+                    help="the-odds-api sport key (e.g. soccer_fifa_world_cup, soccer_epl)")
     ap.add_argument("--days", type=int, default=3, choices=range(0, 4),
                     help="daysFrom for historical completed games (0=free, 1-3=2 req)")
     args = ap.parse_args()
@@ -92,8 +96,8 @@ def main():
                  "(free key: https://the-odds-api.com).")
 
     conn = db.init()
-    games = fetch_scores(api_key, args.days)
-    store(conn, games)
+    games = fetch_scores(api_key, args.sport, args.days)
+    store(conn, args.sport, games)
 
 
 if __name__ == "__main__":

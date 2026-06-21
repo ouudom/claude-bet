@@ -1,8 +1,7 @@
 .venv/
 .pydeps/
 .env
-data/*.db
-data/*.db-journal
+data/
 __pycache__/
 *.pyc
 .DS_Store

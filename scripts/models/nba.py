@@ -1,8 +1,8 @@
-"""model.py — fair-line engine. Elo power ratings -> vig-free fair probabilities.
+"""models/nba.py — fair-line engine: Elo power ratings -> vig-free fair probabilities.
 
-Phase-0 step #3. The "weekly forecast" analog: turn settled history into a forward
-view of each game. Pure, deterministic Elo (FiveThirtyEight NBA flavor) so calibration
-is honest and reproducible — no opaque ML, every number traceable.
+The "weekly forecast" analog: turn settled history into a forward view of each game.
+Pure, deterministic Elo (FiveThirtyEight NBA flavor) so calibration is honest and
+reproducible — no opaque ML, every number traceable.
 
 What it produces today (robust from Elo alone):
   - moneyline  : fair home/away win probability (logistic Elo)
@@ -11,22 +11,26 @@ What it does NOT produce yet (needs pace + off/def efficiency = box-score stats 
 nba_api, Phase 1): totals. We refuse to fake a totals number — see predict()['total'].
 
 Training reads settled `game` rows (status='final') in chronological order and walks
-Elo game-by-game, writing `team_rating`. Off-season the table may be empty; train is a
+Elo game-by-game, writing `rating`. Off-season the table may be empty; train is a
 no-op until results.py (or a historical backfill) has populated finals.
 
 Usage:
-    bash scripts/pyrun.sh scripts/model.py --train
-    bash scripts/pyrun.sh scripts/model.py --predict "Boston Celtics" "Miami Heat"
-    bash scripts/pyrun.sh scripts/model.py --predict "Boston Celtics" "Miami Heat" --line -5.5
+    bash scripts/pyrun.sh scripts/models/nba.py --train
+    bash scripts/pyrun.sh scripts/models/nba.py --predict "Boston Celtics" "Miami Heat"
+    bash scripts/pyrun.sh scripts/models/nba.py --predict "Boston Celtics" "Miami Heat" --line -5.5
 """
 import argparse
 import datetime as dt
+import json
 import math
 import os
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from lib import db  # noqa: E402
+
+SPORT = "basketball_nba"
+sport_keys = (SPORT,)
 
 # --- Elo constants (FiveThirtyEight NBA calibration) ---
 BASE_RATING = 1500.0     # cold-start rating for an unseen team
@@ -34,6 +38,10 @@ HCA_ELO = 100.0          # home-court advantage in Elo points (~3.5 pts)
 K = 20.0                 # update step size
 ELO_PER_POINT = 28.0     # ~28 Elo ≈ 1 point of spread (538)
 MARGIN_SD = 12.0         # SD of NBA game margin vs prediction (points)
+
+
+def gate_params(sport_key):
+    return {"pool": "", "congestion_days": None, "markets": ["h2h", "spreads"]}
 
 
 def _now():
@@ -50,13 +58,15 @@ def _mov_mult(mov, winner_elo_diff):
     return ((abs(mov) + 3.0) ** 0.8) / (7.5 + 0.006 * winner_elo_diff)
 
 
-def train(conn):
-    """Walk settled games chronologically, update Elo, persist team_rating. Returns dict."""
+def train(conn, sport_key=None):
+    """Walk settled games chronologically, update Elo, persist `rating`. Returns dict."""
     rows = conn.execute(
         """SELECT home, away, home_score, away_score
              FROM game
             WHERE status='final' AND home_score IS NOT NULL AND away_score IS NOT NULL
-            ORDER BY commence ASC"""
+              AND sport=?
+            ORDER BY commence ASC""",
+        (SPORT,),
     ).fetchall()
 
     ratings, counts = {}, {}
@@ -80,14 +90,14 @@ def train(conn):
     now = _now()
     for team, r in ratings.items():
         conn.execute(
-            """INSERT INTO team_rating (team, rating, games, updated_at)
-               VALUES (?,?,?,?)
-               ON CONFLICT(team) DO UPDATE SET
-                   rating=excluded.rating, games=excluded.games, updated_at=excluded.updated_at""",
-            (team, r, counts[team], now),
+            """INSERT INTO rating (sport, pool, team, params, games, updated_at)
+               VALUES (?,'',?,?,?,?)
+               ON CONFLICT(sport, pool, team) DO UPDATE SET
+                   params=excluded.params, games=excluded.games, updated_at=excluded.updated_at""",
+            (SPORT, team, json.dumps({"rating": r}), counts[team], now),
         )
     conn.commit()
-    print(f"[model] trained on {len(rows)} final games, {len(ratings)} teams rated")
+    print(f"[models.nba] trained on {len(rows)} final games, {len(ratings)} teams rated")
     return ratings
 
 
@@ -95,7 +105,7 @@ def _norm_cdf(x):
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
-def predict(conn, home, away, line=None, ratings=None):
+def predict(conn, home, away, line=None, ratings=None, sport_key=None):
     """Fair probabilities for a single matchup. `line` = home spread (e.g. -5.5).
 
     ratings: optional in-memory dict (from train) to avoid a db read.
@@ -103,8 +113,10 @@ def predict(conn, home, away, line=None, ratings=None):
     def _get(team):
         if ratings is not None:
             return ratings.get(team, BASE_RATING)
-        row = conn.execute("SELECT rating FROM team_rating WHERE team=?", (team,)).fetchone()
-        return row["rating"] if row else BASE_RATING
+        row = conn.execute(
+            "SELECT params FROM rating WHERE sport=? AND pool='' AND team=?", (SPORT, team),
+        ).fetchone()
+        return json.loads(row["params"])["rating"] if row else BASE_RATING
 
     r_home = _get(home) + HCA_ELO
     r_away = _get(away)
@@ -129,6 +141,22 @@ def predict(conn, home, away, line=None, ratings=None):
     return out
 
 
+def model_prob(pred, market, outcome, point, home, away):
+    """Model fair prob for a specific candidate outcome/point. None if unsupported."""
+    if market == "h2h":
+        return pred["ml_home"] if outcome == home else (pred["ml_away"] if outcome == away else None)
+    if market == "spreads":
+        # home covers if home_margin + point > 0 ; away if -home_margin + point > 0
+        if outcome == home:
+            z = (pred["fair_margin"] + point) / MARGIN_SD
+        elif outcome == away:
+            z = (-pred["fair_margin"] + point) / MARGIN_SD
+        else:
+            return None
+        return _norm_cdf(z)
+    return None  # totals = Phase 1
+
+
 def _fmt(p):
     lines = [
         f"  {p['away']} @ {p['home']}",
@@ -146,7 +174,7 @@ def _fmt(p):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--train", action="store_true", help="rebuild team_rating from settled games")
+    ap.add_argument("--train", action="store_true", help="rebuild rating from settled games")
     ap.add_argument("--predict", nargs=2, metavar=("HOME", "AWAY"), help="fair line for one matchup")
     ap.add_argument("--line", type=float, default=None, help="home spread to grade cover prob (e.g. -5.5)")
     args = ap.parse_args()
